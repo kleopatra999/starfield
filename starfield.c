@@ -1,4 +1,28 @@
+/*
+ * starfield.c
+ *
+ * Starfield
+ *
+ * Copyright (C) 2004 Mark Probst
+ *
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 675 Mass Ave, Cambridge, MA 02139, USA.
+ */
+
+#ifdef QUICKTIME
 #include <QuickTime/QuickTime.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -10,30 +34,79 @@
 
 #include "api.h"
 
-#define CIRCLE_CANVAS_SIZE    128
-#define CIRCLE_SIZE           32
+// Size of the output images/movie in pixels
+#define OUTPUT_WIDTH              720
+#define OUTPUT_HEIGHT             576
 
-#define FULL_WIDTH    (768 * 4)
-#define FULL_HEIGHT   (576 * 4)
+// The number of frames per second for QuickTime movies
+#define FPS                       25
 
-#define OUTPUT_WIDTH  720
-#define OUTPUT_HEIGHT 576
+// The number of frames to calculate
+#define NUM_FRAMES                (FPS * 5)
 
-#define MAX_STAR_SIZE   20
+// The codec to use for the QuickTime movie
+#define QUICKTIME_CODEC           kDVCPALCodecType
 
-#define CYLINDER_DIAMETER         1000
-#define CYLINDER_LENGTH           1500
-#define CORRIDOR_DIAMETER         100
-
+// The number of stars in the star cylinder (see below for details on
+// the latter).
 #define NUM_STARS                 500
 
+// The speed with which the viewer travels though the star field.
+// Higher is faster.
+#define SPEED                     0.5
+
+// Internally, a bigger image is calculated and then scaled down to
+// the actual output size.  This first makes it possible to assume
+// square pixels while the output may still have a non-square aspect
+// ratio, and it gives us subpixel accuracy without really having to
+// implement it.
+//
+// These two define the size of this intermediate, internal image.  If
+// your output format has non-square pixels (like NTSC or PAL), you'll
+// have to use a multiple of the squared size here.
+#define FULL_WIDTH                (768 * 4)
+#define FULL_HEIGHT               (576 * 4)
+
+// The maximum size of a star in the intermediate image in pixels.
+// This must be less than the circle size below (32 by default).
+#define MAX_STAR_SIZE             20
+
+// The stars are confined to a cylindrical area and they travel along
+// the length of it.  The stars that travel out of the cylinder on the
+// far side come in again at the near side.  (You can either think of
+// the movement as the viewer travelling along an infinte cylinder
+// with a repeated pattern of stars and a finite drawing distance or
+// as the viewer staying put and the stars moving across the
+// cylinder).
+//
+// These two define the diameter and the length of the cylinder.
+#define CYLINDER_DIAMETER         1000
+#define CYLINDER_LENGTH           1500
+
+// Actually, the stars are not everywhere in the cylinder.  There is a
+// smaller cylindrical area along the whole length of the cylinder
+// where there are no stars, to prevent the stars from coming too
+// close to the viewer.  This defines its diameter.  It must of course
+// be smaller than the diameter of the star field cylinder above.
+#define CORRIDOR_DIAMETER         100
+
+// Optical parameters.  Experiment if you like.
 #define VIEWPORT_DISTANCE         10.0
 #define VIEWPORT_WIDTH            10.0
-#define VIEWPORT_HEIGHT           (VIEWPORT_WIDTH * FULL_HEIGHT / FULL_WIDTH)
 
-#define SPEED                     0.5
-#define FPS                       25
-#define NUM_FRAMES                (FPS * 30)
+// We don't draw circles with antialiasing.  Instead we draw one big
+// circle and then scale it down to get the antialiasing.  This gives
+// the size of that circle and also the size of the image it is drawn
+// in.  The bigger this image, the more accuracy we have in scaling
+// down the circle.  Making it more than about 8 times as big as the
+// circle is probably excessive overkill, though.
+#define CIRCLE_CANVAS_SIZE        128
+#define CIRCLE_SIZE               32
+
+// This assumes that the intermediate image is wider than it is high.
+// If this is not the case, exchange WIDTH and HEIGHT in all three
+// names on the right side.
+#define VIEWPORT_HEIGHT           (VIEWPORT_WIDTH * FULL_HEIGHT / FULL_WIDTH)
 
 bitmap_t *circle;
 
@@ -115,46 +188,6 @@ bitmap_add_with_crop (bitmap_t *dest, bitmap_t *src, int x, int y)
 
     bitmap_free(cropped_src);
     bitmap_free(cropped_dest);
-}
-
-int
-make_fsspec_from_filename (char *name, FSSpec *spec)
-{
-    CFURLRef urlref;
-    FSRef fsref;
-    int fd;
-
-    fd = open(name, O_WRONLY | O_CREAT, 0666);
-    if (fd == -1)
-        return 0;
-    close(fd);
-
-    urlref = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, CFStringCreateWithCString(NULL, name, CFStringGetSystemEncoding()), kCFURLPOSIXPathStyle, FALSE);
-    if (urlref == NULL)
-        return 0;
-    //printf("%s\n", CFStringGetCStringPtr(CFURLGetString(urlref), CFStringGetSystemEncoding()));
-    if (!CFURLGetFSRef(urlref, &fsref))
-        return 0;
-    FSGetCatalogInfo(&fsref, kFSCatInfoNone, NULL, NULL, spec, NULL);
-
-    unlink(name);
-
-    return 1;
-}
-
-static StringPtr QTUtils_ConvertCToPascalString (char *theString)
-{
-	StringPtr	myString = malloc(strlen(theString) + 1);
-	short		myIndex = 0;
-
-	while (theString[myIndex] != '\0') {
-		myString[myIndex + 1] = theString[myIndex];
-		myIndex++;
-	}
-	
-	myString[0] = (unsigned char)myIndex;
-	
-	return(myString);
 }
 
 void
@@ -256,9 +289,7 @@ render_frame (int frame)
 	float x = stars[i].x, y = stars[i].y;
 	float z = (stars[i].z >= pos) ? (stars[i].z - CYLINDER_LENGTH) : stars[i].z;
 	float dz = pos - z + VIEWPORT_DISTANCE;
-	float dx = sqrtf(x * x + dz * dz);
 	float rx = x * VIEWPORT_DISTANCE / dz;
-	float dy = sqrtf(y * y + dz * dz);
 	float ry = y * VIEWPORT_DISTANCE / dz;
 	float d = sqrtf(x * x + y * y + dz * dz);
 	float vx = rx / VIEWPORT_WIDTH * FULL_WIDTH / 2.0 + FULL_WIDTH / 2.0;
@@ -284,8 +315,49 @@ render_frame (int frame)
     return out;
 }
 
+#ifdef QUICKTIME
 int
-main (void)
+make_fsspec_from_filename (char *name, FSSpec *spec)
+{
+    CFURLRef urlref;
+    FSRef fsref;
+    int fd;
+
+    fd = open(name, O_WRONLY | O_CREAT, 0666);
+    if (fd == -1)
+        return 0;
+    close(fd);
+
+    urlref = CFURLCreateWithFileSystemPath(kCFAllocatorDefault, CFStringCreateWithCString(NULL, name, CFStringGetSystemEncoding()), kCFURLPOSIXPathStyle, FALSE);
+    if (urlref == NULL)
+        return 0;
+    //printf("%s\n", CFStringGetCStringPtr(CFURLGetString(urlref), CFStringGetSystemEncoding()));
+    if (!CFURLGetFSRef(urlref, &fsref))
+        return 0;
+    FSGetCatalogInfo(&fsref, kFSCatInfoNone, NULL, NULL, spec, NULL);
+
+    unlink(name);
+
+    return 1;
+}
+
+static StringPtr QTUtils_ConvertCToPascalString (char *theString)
+{
+	StringPtr	myString = malloc(strlen(theString) + 1);
+	short		myIndex = 0;
+
+	while (theString[myIndex] != '\0') {
+		myString[myIndex + 1] = theString[myIndex];
+		myIndex++;
+	}
+	
+	myString[0] = (unsigned char)myIndex;
+	
+	return(myString);
+}
+
+void
+run (void)
 {
     Rect trackFrame = { 0, 0, OUTPUT_HEIGHT, OUTPUT_WIDTH };
     Movie theMovie = nil;
@@ -294,13 +366,10 @@ main (void)
     short resId = movieInDataForkResID;
     OSErr err = noErr;
 
-    init_circle();
-    init_stars();
-
     EnterMovies();
 
     if (!make_fsspec_from_filename("out.mov", &mySpec))
-        return 0;
+        return;
 
     err = CreateMovieFile (&mySpec, 
 			   FOUR_CHAR_CODE('TVOD'),
@@ -309,7 +378,7 @@ main (void)
 			   &resRefNum, 
 			   &theMovie );
     if (err != noErr || theMovie == nil)
-        return 0;
+        return;
 
     {
 	Track theTrack;
@@ -321,7 +390,7 @@ main (void)
 				  FixRatio(OUTPUT_HEIGHT,1), /* height */
 				  kNoVolume);  /* trackVolume */
 	if (GetMoviesError() != noErr)
-            return 0;
+            return;
 
 	// 2. Create the media for the track
 	theMedia = NewTrackMedia (theTrack,		/* track identifier */
@@ -330,12 +399,12 @@ main (void)
 				  nil,	/* data reference - use the file that is associated with the movie  */
 				  0);		/* data reference type */
 	if (GetMoviesError() != noErr)
-            return 0;
+            return;
 
 	// 3. Establish a media-editing session
 	err = BeginMediaEdits (theMedia);
 	if (err != noErr)
-            return 0;
+            return;
 
 	// 3a. Add Samples to the media
 	{
@@ -356,7 +425,7 @@ main (void)
 			     nil,			/* handle to GDevice */ 
 			     (GWorldFlags)0);	/* flags */
 	    if (err != noErr)
-                return 0;
+                return;
         
 	    // Lock the pixels
 	    LockPixels (GetGWorldPixMap(theGWorld)/*GetPortPixMap(theGWorld)*/);
@@ -371,12 +440,12 @@ main (void)
 					(CompressorComponent)anyCodec,  		/* compressor identifier */
 					&maxCompressedSize);		    	/* returned size */
 	    if (err != noErr)
-                return 0;
+                return;
         
 	    // Create a new handle of the right size for our compressed image data
 	    compressedData = NewHandle(maxCompressedSize);
 	    if (MemError() != noErr)
-                return 0;
+                return;
         
 	    MoveHHi( compressedData );
 	    HLock( compressedData );
@@ -385,7 +454,7 @@ main (void)
 	    // Create a handle for the Image Description Structure
 	    imageDesc = (ImageDescriptionHandle)NewHandle(4);
 	    if (MemError() != noErr)
-                return 0;
+                return;
         
 	    // Change the current graphics port to the GWorld
 	    GetGWorld(&oldPort, &oldGDeviceH);
@@ -437,11 +506,11 @@ main (void)
 		err = CompressImage(GetGWorldPixMap(theGWorld),	/* source image to compress */
 				    &trackFrame, 		/* bounds */
 				    codecMaxQuality,	/* desired image quality */
-				    kDVCPALCodecType,	/* compressor identifier */
+				    QUICKTIME_CODEC,	/* compressor identifier */
 				    imageDesc, 		/* handle to Image Description Structure; will be resized by call */
 				    compressedDataPtr);	/* pointer to a location to recieve the compressed image data */
 		if (err != noErr)
-                    return 0;
+                    return;
         
 		// Add sample data and a description to a media
 		err = AddMediaSample(theMedia,	/* media specifier */ 
@@ -454,7 +523,7 @@ main (void)
 				     0,	/* control flag indicating self-contained samples */
 				     nil);		/* returns a time value where sample was insterted */
 		if (err != noErr)
-                    return 0;
+                    return;
 
 		printf("frame %ld\n", frame);
 	    } // for loop
@@ -483,7 +552,7 @@ main (void)
 	// 3b. End media-editing session
 	err = EndMediaEdits (theMedia);
 	if (err != noErr)
-            return 0;
+            return;
 
 	// 4. Insert a reference to a media segment into the track
 	err = InsertMediaIntoTrack (theTrack,		/* track specifier */
@@ -492,7 +561,7 @@ main (void)
                                     GetMediaDuration(theMedia), /* media duration */
                                     fixed1);		/* media rate ((Fixed) 0x00010000L) */
 	if (err != noErr)
-            return 0;
+            return;
     }
 
     err = AddMovieResource (theMovie, resRefNum, &resId, QTUtils_ConvertCToPascalString ("StarField"));
@@ -503,6 +572,35 @@ main (void)
     }
     
     DisposeMovie(theMovie);
+}
+#else
+void
+run (void)
+{
+    int frame;
+
+    for (frame = 0; frame < NUM_FRAMES; ++frame)
+    {
+	char filename[64];
+	bitmap_t *image = render_frame(frame);
+
+	sprintf(filename, "out%04d.png", frame);
+	bitmap_write(image, filename);
+
+	printf("frame %d\n", frame);
+
+	bitmap_free(image);
+    }
+}
+#endif
+
+int
+main (void)
+{
+    init_circle();
+    init_stars();
+
+    run();
 
     return 0;
 }
